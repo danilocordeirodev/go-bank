@@ -27,6 +27,8 @@ func NewAPIServer(listenAddr string, store Storage) *APIServer {
 func (s *APIServer) Run() {
 	router := mux.NewRouter()
 
+	router.HandleFunc("/login", makeHTTPHandleFunc(s.handleLogin))
+
 	router.HandleFunc("/account", makeHTTPHandleFunc(s.handleAccount))
 
 	router.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandleFunc(s.handleGetAccountByID), s.store))
@@ -36,6 +38,38 @@ func (s *APIServer) Run() {
 	log.Println("JSON API server running on port: ", s.listenAddr)
 
 	http.ListenAndServe(s.listenAddr, router)
+}
+
+func (s *APIServer) handleLogin(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != "POST" {
+		return fmt.Errorf("method not allowed %s", r.Method)
+	}
+
+	var req LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return err
+	}
+
+	acc, err := s.store.GetAccountByNumber(int(req.Number))
+	if err != nil {
+		return err
+	}
+
+	if !acc.ValidPassword(req.Password) {
+		return fmt.Errorf("not authenticated")
+	}
+
+	token, err := createJWT(acc)
+	if err != nil {
+		return err
+	}
+
+	resp := LoginResponse{
+		Token:  token,
+		Number: acc.Number,
+	}
+
+	return WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *APIServer) handleAccount(w http.ResponseWriter, r *http.Request) error {
@@ -89,17 +123,14 @@ func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 
-	account := NewAccount(createAccountReq.FirstName, createAccountReq.LastName)
-	if err := s.store.CreateAccount(account); err != nil {
-		return err
-	}
-
-	token, err := createJWT(account)
+	account, err := NewAccount(createAccountReq.FirstName, createAccountReq.LastName, createAccountReq.Password)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println(token)
+	if err := s.store.CreateAccount(account); err != nil {
+		return err
+	}
 
 	return WriteJSON(w, http.StatusOK, account)
 }
@@ -174,7 +205,7 @@ func withJWTAuth(handlerFunc http.HandlerFunc, s Storage) http.HandlerFunc {
 		}
 
 		claims := token.Claims.(jwt.MapClaims)
-		
+
 		if account.Number != int64(claims["accountNumber"].(float64)) {
 			WriteJSON(w, http.StatusForbidden, ApiError{Error: "permission denied"})
 			return
